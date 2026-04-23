@@ -17,10 +17,14 @@ actor RcloneService {
     private let webdavBasePort = 18765
 
     // MARK: - Process runner — safe for arbitrary args (no shell quoting needed)
-    // stdin is always /dev/null to prevent any interactive credential prompts
-    // (mount_webdav and others may try to read credentials from stdin in GUI apps)
+    // stdin is /dev/null by default to prevent hanging, except for auth commands
     @discardableResult
     nonisolated func runProcess(executable: String, arguments: [String]) -> (output: String, error: String, exitCode: Int32) {
+        return runProcess(executable: executable, arguments: arguments, allowInteractiveInput: false)
+    }
+
+    @discardableResult
+    nonisolated func runProcess(executable: String, arguments: [String], allowInteractiveInput: Bool) -> (output: String, error: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -28,8 +32,17 @@ actor RcloneService {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
-        // Suppress any interactive stdin prompts (credential dialogs, confirmations, etc.)
-        process.standardInput = FileHandle.nullDevice
+
+        // For OAuth/auth commands, allow interaction with user terminal
+        // For other commands, suppress stdin to avoid hanging
+        if allowInteractiveInput {
+            // Use inherited stdin (connected to current terminal for OAuth flow)
+            process.standardInput = FileHandle.standardInput
+        } else {
+            // Suppress stdin to prevent hanging on interactive prompts
+            process.standardInput = FileHandle.nullDevice
+        }
+
         do { try process.run() } catch { return ("", error.localizedDescription, -1) }
         process.waitUntilExit()
         let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -501,11 +514,18 @@ actor RcloneService {
         return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
-    /// Runs the OAuth reconnect flow — opens the default browser, blocks until auth completes.
+    /// Runs the OAuth reconnect flow — opens the default browser, allows user to authenticate.
+    /// This needs interactive terminal access for OAuth to work properly.
     func reconnectRemote(name: String) async -> (ok: Bool, error: String) {
         guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
+
+        // Use 'config reconnect' with interactive stdin for OAuth flow
+        // This opens the browser and allows the user to complete authentication
+        // CRITICAL: allowInteractiveInput must be true for OAuth to work
         let r = runProcess(executable: rp,
-                           arguments: ["config", "reconnect", "\(name):", "--auto-confirm"])
+                           arguments: ["config", "reconnect", "\(name):"],
+                           allowInteractiveInput: true)
+
         return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
