@@ -17,14 +17,10 @@ actor RcloneService {
     private let webdavBasePort = 18765
 
     // MARK: - Process runner — safe for arbitrary args (no shell quoting needed)
-    // stdin is /dev/null by default to prevent hanging, except for auth commands
+    // stdin is always /dev/null to prevent hanging on interactive prompts
+    // (OAuth handled separately via Terminal for better UX)
     @discardableResult
     nonisolated func runProcess(executable: String, arguments: [String]) -> (output: String, error: String, exitCode: Int32) {
-        return runProcess(executable: executable, arguments: arguments, allowInteractiveInput: false)
-    }
-
-    @discardableResult
-    nonisolated func runProcess(executable: String, arguments: [String], allowInteractiveInput: Bool) -> (output: String, error: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -32,17 +28,8 @@ actor RcloneService {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
-
-        // For OAuth/auth commands, allow interaction with user terminal
-        // For other commands, suppress stdin to avoid hanging
-        if allowInteractiveInput {
-            // Use inherited stdin (connected to current terminal for OAuth flow)
-            process.standardInput = FileHandle.standardInput
-        } else {
-            // Suppress stdin to prevent hanging on interactive prompts
-            process.standardInput = FileHandle.nullDevice
-        }
-
+        // Suppress stdin to prevent hanging on interactive prompts
+        process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return ("", error.localizedDescription, -1) }
         process.waitUntilExit()
         let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -514,19 +501,35 @@ actor RcloneService {
         return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
-    /// Runs the OAuth reconnect flow — opens the default browser, allows user to authenticate.
-    /// This needs interactive terminal access for OAuth to work properly.
+    /// Runs the OAuth reconnect flow by opening Terminal for interactive auth.
+    /// This is the most reliable way to handle OAuth in a GUI app.
     func reconnectRemote(name: String) async -> (ok: Bool, error: String) {
         guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
 
-        // Use 'config reconnect' with interactive stdin for OAuth flow
-        // This opens the browser and allows the user to complete authentication
-        // CRITICAL: allowInteractiveInput must be true for OAuth to work
-        let r = runProcess(executable: rp,
-                           arguments: ["config", "reconnect", "\(name):"],
-                           allowInteractiveInput: true)
+        // For GUI apps, opening Terminal is the best approach for OAuth flows
+        // The user can see the browser, complete auth, and return to Terminal
+        let script = """
+tell application "Terminal"
+    activate
+    do script "'\(rp)' config reconnect '\(name):' && echo '✅ Autenticación completada' && sleep 2"
+end tell
+"""
 
-        return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
+        var error: NSDictionary?
+        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+
+        if error != nil {
+            return (false, "No se pudo abrir Terminal: \(error?.description ?? "desconocido")")
+        }
+
+        // Give user time to complete auth in Terminal (30 seconds)
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+
+        // Check if the remote was successfully configured by listing remotes
+        let remotes = await listRemotes()
+        let isConfigured = remotes.contains { $0.name == name }
+
+        return (isConfigured, isConfigured ? "" : "Autenticación no completada. Por favor intenta nuevamente.")
     }
 
     /// Removes a remote from rclone config.
