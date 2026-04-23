@@ -159,17 +159,57 @@ actor RcloneService {
             "mount",
             "\(account.remoteName):",
             mountPoint,
-            "--vfs-cache-mode", "writes",
+            // ─── CACHE & PERFORMANCE ───
+            "--vfs-cache-mode", "full",              // Full caching for better performance
+            "--vfs-cache-max-age", "24h",            // Keep cache for 24 hours
+            "--vfs-cache-max-size", "5G",            // Max cache size (adjust based on disk space)
+            "--buffer-size", "32M",                  // Larger buffer for streaming
+
+            // ─── CONCURRENCY & PARALLELISM ───
+            "--transfers", "8",                      // 8 concurrent transfers (optimized for bandwidth)
+            "--checkers", "16",                      // 16 parallel checkers (verify integrity)
+            "--cache-read-retries", "5",             // Retry failed reads
+            "--low-level-retries", "10",             // 10 retries for network issues
+
+            // ─── TIMEOUTS (for large files) ───
+            "--timeout", "30m",                      // 30 minute timeout for operations
+            "--contimeout", "60s",                   // Connection timeout
+            "--retries", "5",                        // Top-level retries
+            "--retries-sleep", "100ms",              // Wait between retries
+
+            // ─── STABILITY ───
             "--daemon",
             "--daemon-wait", "60s",
             "--log-level", "INFO",
             "--log-file", logFile,
+            "--poll-interval", "1m",                 // Check for changes every minute
         ]
+
+        // Provider-specific optimizations
         switch account.provider {
-        case .onedrive:    args += ["--onedrive-chunk-size", "10M"]
-        case .googledrive: args += ["--drive-chunk-size", "8M"]
-        case .sftp:        args += ["--sftp-idle-timeout", "60s"]
-        default: break
+        case .onedrive:
+            args += [
+                "--onedrive-chunk-size", "50M",      // Larger chunks = faster transfers
+                "--onedrive-drive-type", "business",  // Better for business accounts
+                "--onedrive-no-auth-with-default", "false",
+                "--onedrive-expiry-time", "60m",     // Token expiry handling
+            ]
+        case .googledrive:
+            args += [
+                "--drive-chunk-size", "32M",         // Larger chunks than before
+                "--drive-service-account-file", "/path/to/sa.json",  // If using service account
+                "--drive-use-trash", "true",
+            ]
+        case .sftp:
+            args += [
+                "--sftp-idle-timeout", "5m",         // Longer idle timeout for long transfers
+                "--sftp-concurrency", "8",           // Concurrent SFTP operations
+            ]
+        default:
+            // Generic cloud providers
+            args += [
+                "--multi-thread-streams", "4",       // Multi-threaded downloads
+            ]
         }
 
         let result = runProcess(executable: rp, arguments: args)
@@ -208,14 +248,59 @@ actor RcloneService {
         // Start rclone WebDAV server (non-blocking background process)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: rp)
-        process.arguments = [
+
+        // WebDAV-optimized arguments for fast bulk transfers
+        var webdavArgs: [String] = [
             "serve", "webdav",
             "\(account.remoteName):",
             "--addr", "127.0.0.1:\(port)",
-            "--vfs-cache-mode", "writes",
-            "--log-level", "ERROR",   // avoid PROPFIND/OPTIONS noise in error messages
+
+            // ─── CACHE & PERFORMANCE ───
+            "--vfs-cache-mode", "full",              // Full caching for WebDAV
+            "--vfs-cache-max-age", "24h",
+            "--vfs-cache-max-size", "5G",
+            "--buffer-size", "32M",
+
+            // ─── CONCURRENCY & PARALLELISM ───
+            "--transfers", "8",                      // Concurrent WebDAV transfers
+            "--checkers", "16",
+            "--cache-read-retries", "5",
+            "--low-level-retries", "10",
+
+            // ─── TIMEOUTS ───
+            "--timeout", "30m",                      // Long timeout for large files
+            "--contimeout", "60s",
+            "--retries", "5",
+            "--retries-sleep", "100ms",
+
+            // ─── WebDAV SPECIFIC ───
+            "--webdav-bearer-token-cmd", "",        // If using bearer tokens
+            "--poll-interval", "1m",
+            "--log-level", "ERROR",                 // Avoid noise
             "--log-file", logFile,
         ]
+
+        // Add provider-specific optimizations for WebDAV
+        switch account.provider {
+        case .onedrive:
+            webdavArgs += [
+                "--onedrive-chunk-size", "50M",
+                "--onedrive-drive-type", "business",
+            ]
+        case .googledrive:
+            webdavArgs += [
+                "--drive-chunk-size", "32M",
+            ]
+        case .sftp:
+            webdavArgs += [
+                "--sftp-idle-timeout", "5m",
+                "--sftp-concurrency", "8",
+            ]
+        default:
+            webdavArgs += ["--multi-thread-streams", "4"]
+        }
+
+        process.arguments = webdavArgs
         process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
