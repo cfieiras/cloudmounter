@@ -159,57 +159,18 @@ actor RcloneService {
             "mount",
             "\(account.remoteName):",
             mountPoint,
-            // ─── CACHE & PERFORMANCE ───
-            "--vfs-cache-mode", "full",              // Full caching for better performance
-            "--vfs-cache-max-age", "24h",            // Keep cache for 24 hours
-            "--vfs-cache-max-size", "5G",            // Max cache size (adjust based on disk space)
-            "--buffer-size", "32M",                  // Larger buffer for streaming
-
-            // ─── CONCURRENCY & PARALLELISM ───
-            "--transfers", "8",                      // 8 concurrent transfers (optimized for bandwidth)
-            "--checkers", "16",                      // 16 parallel checkers (verify integrity)
-            "--cache-read-retries", "5",             // Retry failed reads
-            "--low-level-retries", "10",             // 10 retries for network issues
-
-            // ─── TIMEOUTS (for large files) ───
-            "--timeout", "30m",                      // 30 minute timeout for operations
-            "--contimeout", "60s",                   // Connection timeout
-            "--retries", "5",                        // Top-level retries
-            "--retries-sleep", "100ms",              // Wait between retries
-
-            // ─── STABILITY ───
+            "--vfs-cache-mode", "writes",
             "--daemon",
             "--daemon-wait", "60s",
             "--log-level", "INFO",
             "--log-file", logFile,
-            "--poll-interval", "1m",                 // Check for changes every minute
         ]
 
-        // Provider-specific optimizations
         switch account.provider {
-        case .onedrive:
-            args += [
-                "--onedrive-chunk-size", "50M",      // Larger chunks = faster transfers
-                "--onedrive-drive-type", "business",  // Better for business accounts
-                "--onedrive-no-auth-with-default", "false",
-                "--onedrive-expiry-time", "60m",     // Token expiry handling
-            ]
-        case .googledrive:
-            args += [
-                "--drive-chunk-size", "32M",         // Larger chunks than before
-                "--drive-service-account-file", "/path/to/sa.json",  // If using service account
-                "--drive-use-trash", "true",
-            ]
-        case .sftp:
-            args += [
-                "--sftp-idle-timeout", "5m",         // Longer idle timeout for long transfers
-                "--sftp-concurrency", "8",           // Concurrent SFTP operations
-            ]
-        default:
-            // Generic cloud providers
-            args += [
-                "--multi-thread-streams", "4",       // Multi-threaded downloads
-            ]
+        case .onedrive:    args += ["--onedrive-chunk-size", "10M"]
+        case .googledrive: args += ["--drive-chunk-size", "8M"]
+        case .sftp:        args += ["--sftp-idle-timeout", "60s"]
+        default: break
         }
 
         let result = runProcess(executable: rp, arguments: args)
@@ -249,58 +210,14 @@ actor RcloneService {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: rp)
 
-        // WebDAV-optimized arguments for fast bulk transfers
-        var webdavArgs: [String] = [
+        process.arguments = [
             "serve", "webdav",
             "\(account.remoteName):",
             "--addr", "127.0.0.1:\(port)",
-
-            // ─── CACHE & PERFORMANCE ───
-            "--vfs-cache-mode", "full",              // Full caching for WebDAV
-            "--vfs-cache-max-age", "24h",
-            "--vfs-cache-max-size", "5G",
-            "--buffer-size", "32M",
-
-            // ─── CONCURRENCY & PARALLELISM ───
-            "--transfers", "8",                      // Concurrent WebDAV transfers
-            "--checkers", "16",
-            "--cache-read-retries", "5",
-            "--low-level-retries", "10",
-
-            // ─── TIMEOUTS ───
-            "--timeout", "30m",                      // Long timeout for large files
-            "--contimeout", "60s",
-            "--retries", "5",
-            "--retries-sleep", "100ms",
-
-            // ─── WebDAV SPECIFIC ───
-            "--webdav-bearer-token-cmd", "",        // If using bearer tokens
-            "--poll-interval", "1m",
-            "--log-level", "ERROR",                 // Avoid noise
+            "--vfs-cache-mode", "writes",
+            "--log-level", "ERROR",
             "--log-file", logFile,
         ]
-
-        // Add provider-specific optimizations for WebDAV
-        switch account.provider {
-        case .onedrive:
-            webdavArgs += [
-                "--onedrive-chunk-size", "50M",
-                "--onedrive-drive-type", "business",
-            ]
-        case .googledrive:
-            webdavArgs += [
-                "--drive-chunk-size", "32M",
-            ]
-        case .sftp:
-            webdavArgs += [
-                "--sftp-idle-timeout", "5m",
-                "--sftp-concurrency", "8",
-            ]
-        default:
-            webdavArgs += ["--multi-thread-streams", "4"]
-        }
-
-        process.arguments = webdavArgs
         process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
@@ -335,8 +252,10 @@ actor RcloneService {
             await mountSucceeded(account: account, mountPoint: mountPoint, method: "WebDAV")
         } else {
             stopWebDAVProcess(for: account.id)
+            // Wait briefly so rclone can flush its log before we read it
+            try? await Task.sleep(nanoseconds: 500_000_000)
             let logContent = (try? String(contentsOfFile: logFile, encoding: .utf8)) ?? ""
-            let errMsg = r.error.isEmpty ? buildErrorMessage(stdout: r.output, stderr: "", log: logContent) : r.error
+            let errMsg = buildErrorMessage(stdout: r.output, stderr: r.error, log: logContent)
             await setError(account: account, msg: errMsg)
         }
     }
@@ -743,15 +662,35 @@ end tell
            combined.contains("the file system is not available") {
             return "FUSE no disponible. La app usará WebDAV automáticamente en el próximo intento."
         }
+        if combined.contains("no such host") || combined.contains("dial tcp") ||
+           combined.contains("connection refused") || combined.contains("network is unreachable") {
+            return "Sin conexión a internet o DNS no resuelve. " +
+                   "Verificá tu red (si usás Tailscale, revisá su configuración de DNS)."
+        }
         if combined.contains("couldn't connect") || combined.contains("failed to authorize") ||
-           combined.contains("oauth") || combined.contains("token") {
-            return "Error de autenticación — el token puede haber expirado. " +
-                   "Reconfigurá con: rclone config reconnect \"\(combined)\""
+           combined.contains("token expired") || combined.contains("401") {
+            return "Error de autenticación — el token expiró. Eliminá y volvé a agregar la cuenta."
+        }
+        if combined.contains("unable to get drive_id") {
+            return "Configuración de OneDrive incompleta (falta drive_id). " +
+                   "Eliminá la cuenta y volvé a agregarla."
+        }
+        if combined.contains("didn't find section") {
+            return "Remote no encontrado en la configuración de rclone. " +
+                   "Eliminá la cuenta y volvé a agregarla."
         }
         if !combined.isEmpty {
+            // Return the last non-empty line (most recent rclone log entry)
             return combined.components(separatedBy: "\n").last(where: { !$0.isEmpty }) ?? combined
         }
-        return "Error desconocido (revisá /tmp/cloudmounter-*.log)"
+        // If all outputs are empty, try a quick connectivity probe for a better message
+        let dnsCheck = shell("host graph.microsoft.com 2>&1")
+        if dnsCheck.output.contains("no such host") || dnsCheck.output.contains("timed out") ||
+           dnsCheck.exitCode != 0 {
+            return "Sin conexión a internet o DNS no resuelve. " +
+                   "Verificá tu red (si usás Tailscale, revisá su configuración de DNS)."
+        }
+        return "Error al montar. Intentá desmontar, esperá unos segundos y volvé a montar."
     }
 
     private nonisolated func shortError(_ msg: String) -> String {
