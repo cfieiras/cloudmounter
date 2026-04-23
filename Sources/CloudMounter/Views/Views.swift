@@ -980,6 +980,10 @@ struct AddAccountSheet: View {
         let name = remoteName.trimmingCharacters(in: .whitespaces)
         let type = rcloneType(for: selectedProvider)
 
+        // createRemote for OneDrive handles the full interactive flow:
+        // OAuth in browser + drive type + drive ID selection.
+        // For other OAuth providers (Google Drive, Dropbox, Box) createRemote
+        // only creates the config entry; reconnectRemote then opens the browser.
         let createResult = await RcloneService.shared.createRemote(name: name, type: type)
         if !createResult.ok {
             await MainActor.run {
@@ -989,17 +993,26 @@ struct AddAccountSheet: View {
             return
         }
 
-        let authResult = await RcloneService.shared.reconnectRemote(name: name)
-        if !authResult.ok {
-            await RcloneService.shared.deleteRemote(name: name)
+        var authOk    = true
+        var authError = ""
+
+        if selectedProvider != .onedrive {
+            // Non-OneDrive OAuth providers need a separate reconnect step
+            let authResult = await RcloneService.shared.reconnectRemote(name: name)
+            authOk    = authResult.ok
+            authError = authResult.error
+            if !authOk {
+                await RcloneService.shared.deleteRemote(name: name)
+            }
         }
+
         await MainActor.run {
             isConnecting = false
-            if authResult.ok {
+            if authOk {
                 if label.isEmpty { label = name }
                 step = .mountOptions
             } else {
-                connectError = authResult.error.isEmpty ? "Error de autenticación" : authResult.error
+                connectError = authError.isEmpty ? "Error de autenticación" : authError
             }
         }
     }

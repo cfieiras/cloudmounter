@@ -490,46 +490,143 @@ actor RcloneService {
 
     // MARK: - Remote Management (no terminal needed)
 
-    /// Creates a new rclone remote config entry non-interactively.
-    /// For OAuth providers this only creates a skeleton — call reconnectRemote() after.
-    /// extras: additional key=value pairs e.g. ["host=myhost", "user=admin"]
+    /// Creates a new rclone remote config entry.
+    /// For OneDrive, runs the full interactive config (answering stdin) so rclone
+    /// v1.73+ gets drive_id and drive_type without needing Terminal.
     func createRemote(name: String, type: String, extras: [String] = []) async -> (ok: Bool, error: String) {
         guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
+        if type == "onedrive" {
+            return await createOneDriveRemote(name: name, rclonePath: rp)
+        }
         var args = ["config", "create", name, type, "--non-interactive"]
         args += extras
         let r = runProcess(executable: rp, arguments: args)
         return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
-    /// Runs the OAuth reconnect flow by opening Terminal for interactive auth.
-    /// This is the most reliable way to handle OAuth in a GUI app.
-    func reconnectRemote(name: String) async -> (ok: Bool, error: String) {
-        guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
+    /// Full OneDrive setup replicating what `rclone config` does interactively.
+    /// Feeds answers to stdin as rclone asks questions:
+    ///   1. "Use web browser?" → y   (opens browser for OAuth)
+    ///   2. "config_type>"    → 1   (OneDrive Personal or Business)
+    ///   3. "config_driveid>" → N   (the number matching "OneDrive (personal)")
+    ///   4. "Drive OK? y/n>"  → y   (confirm)
+    /// This gives rclone v1.73+ the drive_id and drive_type it requires.
+    private func createOneDriveRemote(name: String, rclonePath rp: String) async -> (ok: Bool, error: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: rp)
+        process.arguments = ["config", "create", name, "onedrive"]
 
-        // For GUI apps, opening Terminal is the best approach for OAuth flows
-        // The user can see the browser, complete auth, and return to Terminal
-        let script = """
-tell application "Terminal"
-    activate
-    do script "'\(rp)' config reconnect '\(name):' && echo '✅ Autenticación completada' && sleep 2"
-end tell
-"""
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        let inPipe  = Pipe()
+        process.standardOutput = outPipe
+        process.standardError  = errPipe
+        process.standardInput  = inPipe
 
-        var error: NSDictionary?
-        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+        do { try process.run() } catch { return (false, error.localizedDescription) }
 
-        if error != nil {
-            return (false, "No se pudo abrir Terminal: \(error?.description ?? "desconocido")")
+        let inHandle = inPipe.fileHandleForWriting
+        DispatchQueue.global().async {
+            func send(_ s: String) {
+                NSLog("🔑 → stdin: [%@]", s.trimmingCharacters(in: .newlines))
+                inHandle.write(s.data(using: .utf8)!)
+            }
+
+            // Short delay then answer Q1: use web browser for OAuth
+            Thread.sleep(forTimeInterval: 0.5)
+            send("y\n")
+            NSLog("🔑 Sent 'y' — browser will open for OAuth")
+
+            // Accumulate ALL output from both stdout and stderr so we can
+            // match prompts even if they arrive in separate read() chunks.
+            var accumulated = ""
+            var answeredConfigType = false
+            var answeredDriveId   = false
+            var answeredDriveOk   = false
+
+            let deadline = Date().addingTimeInterval(300)  // 5-min total
+
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.3)
+
+                let outStr = String(data: outPipe.fileHandleForReading.availableData, encoding: .utf8) ?? ""
+                let errStr = String(data: errPipe.fileHandleForReading.availableData, encoding: .utf8) ?? ""
+                if !outStr.isEmpty { NSLog("🔑 stdout: %@", outStr) }
+                if !errStr.isEmpty { NSLog("🔑 stderr: %@", errStr) }
+                accumulated += outStr + errStr
+
+                // Q2: drive type — appears after OAuth "Got code"
+                // Actual prompt rclone prints: "config_type> "
+                if !answeredConfigType && accumulated.contains("config_type>") {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    send("1\n")   // 1 = Microsoft OneDrive Personal or Business
+                    answeredConfigType = true
+                    NSLog("🔑 Sent '1' for config_type (personal/business)")
+                }
+
+                // Q3: drive ID — rclone lists available drives then shows "config_driveid> "
+                // Find the line containing "OneDrive (personal)" and use its index number.
+                if answeredConfigType && !answeredDriveId && accumulated.contains("config_driveid>") {
+                    var driveNumber = "0"  // fallback: first entry
+                    let lines = accumulated.components(separatedBy: "\n")
+                    for line in lines {
+                        let lower = line.lowercased()
+                        // Match lines like: " 5 / OneDrive (personal) id=59D47BD0E893439F"
+                        if lower.contains("onedrive") && lower.contains("personal") && !lower.contains("sharepoint") {
+                            let trimmed = line.trimmingCharacters(in: .whitespaces)
+                            // First token is the option number
+                            if let first = trimmed.components(separatedBy: .whitespaces).first,
+                               Int(first) != nil {
+                                driveNumber = first
+                            }
+                            break
+                        }
+                    }
+                    Thread.sleep(forTimeInterval: 0.3)
+                    NSLog("🔑 Selecting drive number: %@", driveNumber)
+                    send("\(driveNumber)\n")
+                    answeredDriveId = true
+                }
+
+                // Q4: "Drive OK? … y/n> " — confirm the selected drive
+                if answeredDriveId && !answeredDriveOk &&
+                   (accumulated.contains("Drive OK?") ||
+                    (accumulated.contains("Found drive") && accumulated.contains("y/n>"))) {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    send("y\n")
+                    answeredDriveOk = true
+                    NSLog("🔑 Sent 'y' for Drive OK")
+                    Thread.sleep(forTimeInterval: 2)  // let rclone finalize
+                }
+
+                if !process.isRunning { break }
+            }
+
+            inHandle.closeFile()
         }
 
-        // Give user time to complete auth in Terminal (30 seconds)
-        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        // Wait up to 5 minutes total for process to complete
+        let deadline = Date().addingTimeInterval(300)
+        while process.isRunning && Date() < deadline {
+            usleep(500_000)
+        }
+        if process.isRunning { process.terminate() }
+        process.waitUntilExit()
 
-        // Check if the remote was successfully configured by listing remotes
-        let remotes = await listRemotes()
-        let isConfigured = remotes.contains { $0.name == name }
+        // Verify drive_id was written (rclone v1.73+ requires it)
+        let check = shell("\"\(rp)\" config show \(name) 2>/dev/null | grep drive_id")
+        let ok = !check.output.isEmpty
+        NSLog("🔑 createOneDriveRemote '%@': ok=%d drive_id_line=%@", name, ok ? 1 : 0, check.output)
+        return (ok, ok ? "" : "No se pudo crear el remote de OneDrive (falta drive_id)")
+    }
 
-        return (isConfigured, isConfigured ? "" : "Autenticación no completada. Por favor intenta nuevamente.")
+    /// Runs the OAuth reconnect flow — opens the default browser, blocks until auth completes.
+    /// Only called for non-OneDrive OAuth providers (Google Drive, Dropbox, Box).
+    func reconnectRemote(name: String) async -> (ok: Bool, error: String) {
+        guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
+        let r = runProcess(executable: rp,
+                           arguments: ["config", "reconnect", "\(name):", "--auto-confirm"])
+        return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
     /// Removes a remote from rclone config.
