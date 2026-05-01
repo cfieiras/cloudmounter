@@ -110,12 +110,38 @@ actor RcloneService {
         return names.map { AccountStore.RemoteInfo(name: $0, type: typeMap[$0] ?? "") }
     }
 
+    // MARK: - Validate Remote Configuration
+    /// Check if a remote is fully configured. OneDrive requires drive_id and drive_type.
+    nonisolated func isRemoteConfigured(name: String, type: String) -> (ok: Bool, reason: String) {
+        guard let rp = rclonePath() else { return (false, "rclone no encontrado") }
+
+        // For OneDrive: require drive_id and drive_type
+        if type == "onedrive" {
+            let checkResult = shell("\"\(rp)\" config show \(name) 2>/dev/null | grep -E 'drive_id|drive_type'")
+            let lines = checkResult.output.components(separatedBy: "\n").filter { !$0.isEmpty }
+            let hasDriveId = lines.contains { $0.contains("drive_id") }
+            let hasDriveType = lines.contains { $0.contains("drive_type") }
+            if !hasDriveId || !hasDriveType {
+                return (false, "Este remote de OneDrive necesita reconfiguración. " +
+                              "Elimínalo y crea uno nuevo, o ejecutá: rclone config reconnect \"\(name):\"")
+            }
+        }
+        return (true, "")
+    }
+
     // MARK: - Mount (auto-selects FUSE or WebDAV)
     func mount(account: Account) async {
         await MainActor.run { account.status = .mounting }
 
         guard let rp = rclonePath() else {
             await setError(account: account, msg: "rclone no encontrado en el sistema")
+            return
+        }
+
+        // Validate the remote is fully configured (OneDrive needs drive_id and drive_type)
+        let (isConfigured, reason) = isRemoteConfigured(name: account.remoteName, type: account.provider.rawValue)
+        guard isConfigured else {
+            await setError(account: account, msg: reason)
             return
         }
 
