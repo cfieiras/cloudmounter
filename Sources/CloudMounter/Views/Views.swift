@@ -107,7 +107,33 @@ struct AccountCard: View {
                 Divider()
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(err).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(err).font(.caption).foregroundStyle(.orange)
+                        Button(action: {
+                            Task {
+                                await RcloneService.shared.reconfigureRemote(
+                                    name: account.remoteName,
+                                    type: account.provider.rawValue
+                                )
+                                // Clear error and try mounting again
+                                await MainActor.run {
+                                    account.lastError = nil
+                                    account.status = .unmounted
+                                }
+                                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                                await RcloneService.shared.mount(account: account)
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Reconfigurar")
+                            }
+                            .font(.caption2).bold()
+                            .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                    }
                     Spacer()
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)

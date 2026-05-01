@@ -574,6 +574,18 @@ actor RcloneService {
         return (r.exitCode == 0, r.error.isEmpty ? r.output : r.error)
     }
 
+    /// Reconfigure an existing remote: delete and recreate it with full OAuth flow.
+    /// Used when a remote has auth errors and needs to be re-authenticated.
+    func reconfigureRemote(name: String, type: String) async -> (ok: Bool, error: String) {
+        NSLog("🔄 Reconfiguring remote: %@", name)
+
+        // Delete the broken remote
+        deleteRemote(name: name)
+
+        // Recreate with full OAuth flow
+        return await createRemote(name: name, type: type)
+    }
+
     /// Removes a remote from rclone config.
     func deleteRemote(name: String) {
         guard let rp = rclonePath() else { return }
