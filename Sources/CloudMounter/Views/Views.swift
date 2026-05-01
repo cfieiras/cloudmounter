@@ -6,6 +6,7 @@ struct AccountCard: View {
     let isSelected: Bool
     @State private var isHovered = false
     @State private var showDetails = false
+    @State private var showReconfigureSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,27 +111,10 @@ struct AccountCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(err).font(.caption).foregroundStyle(.orange)
                         Button(action: {
-                            Task {
-                                let result = await RcloneService.shared.reconfigureRemote(
-                                    name: account.remoteName,
-                                    type: account.provider.rawValue
-                                )
-
-                                // Update UI on main thread
-                                await MainActor.run {
-                                    if result.ok {
-                                        account.lastError = nil
-                                        account.status = .unmounted
-                                    } else {
-                                        account.lastError = "Error reconfigurando: \(result.error)"
-                                    }
-                                }
-
-                                // If reconfigure succeeded, try mounting
-                                if result.ok {
-                                    try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s delay
-                                    await RcloneService.shared.mount(account: account)
-                                }
+                            // Eliminate account and show re-add sheet
+                            AccountStore.shared.remove(account: account)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showReconfigureSheet = true
                             }
                         }) {
                             HStack(spacing: 4) {
@@ -158,6 +142,9 @@ struct AccountCard: View {
         .onTapGesture(count: 2) { showDetails = true }
         .sheet(isPresented: $showDetails) {
             AccountDetailsSheet(account: account, isPresented: $showDetails)
+        }
+        .sheet(isPresented: $showReconfigureSheet) {
+            AddAccountSheet(isPresented: $showReconfigureSheet)
         }
     }
 
