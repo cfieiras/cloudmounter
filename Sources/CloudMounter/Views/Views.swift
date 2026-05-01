@@ -105,9 +105,23 @@ struct AccountCard: View {
 
             if let err = account.lastError, case .error = account.status {
                 Divider()
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(err).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(err).font(.caption).foregroundStyle(.orange)
+                        Button(action: {
+                            RcloneService.shared.openReconnectInTerminal(remoteName: account.remoteName)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "terminal.fill").font(.caption2)
+                                Text("Reautenticar en Terminal")
+                            }
+                            .font(.caption2).bold()
+                            .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                    }
                     Spacer()
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
