@@ -111,17 +111,26 @@ struct AccountCard: View {
                         Text(err).font(.caption).foregroundStyle(.orange)
                         Button(action: {
                             Task {
-                                await RcloneService.shared.reconfigureRemote(
+                                let result = await RcloneService.shared.reconfigureRemote(
                                     name: account.remoteName,
                                     type: account.provider.rawValue
                                 )
-                                // Clear error and try mounting again
+
+                                // Update UI on main thread
                                 await MainActor.run {
-                                    account.lastError = nil
-                                    account.status = .unmounted
+                                    if result.ok {
+                                        account.lastError = nil
+                                        account.status = .unmounted
+                                    } else {
+                                        account.lastError = "Error reconfigurando: \(result.error)"
+                                    }
                                 }
-                                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                                await RcloneService.shared.mount(account: account)
+
+                                // If reconfigure succeeded, try mounting
+                                if result.ok {
+                                    try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5s delay
+                                    await RcloneService.shared.mount(account: account)
+                                }
                             }
                         }) {
                             HStack(spacing: 4) {
