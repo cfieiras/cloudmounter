@@ -728,7 +728,8 @@ end tell
             return "Sin conexión a internet o DNS no resuelve. " +
                    "Verificá tu red (si usás Tailscale, revisá su configuración de DNS)."
         }
-        return "Error al montar. Intentá desmontar, esperá unos segundos y volvé a montar."
+        return "Error al montar: revisa los logs en /tmp/cloudmounter-*.log para más detalles. " +
+               "Probá eliminar la cuenta y agregarla de nuevo."
     }
 
     private nonisolated func shortError(_ msg: String) -> String {

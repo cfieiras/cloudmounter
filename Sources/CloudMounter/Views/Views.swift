@@ -6,10 +6,6 @@ struct AccountCard: View {
     let isSelected: Bool
     @State private var isHovered = false
     @State private var showDetails = false
-    @State private var showReconfigureSheet = false
-    @State private var reconfigureProvider: CloudProvider? = nil
-    @State private var reconfigureRemoteName: String? = nil
-    @EnvironmentObject var store: AccountStore
 
     var body: some View {
         VStack(spacing: 0) {
@@ -111,29 +107,7 @@ struct AccountCard: View {
                 Divider()
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(err).font(.caption).foregroundStyle(.orange)
-                        Button(action: {
-                            // Save provider info to state BEFORE deleting
-                            reconfigureProvider = account.provider
-                            reconfigureRemoteName = account.remoteName
-
-                            // Delete broken account
-                            AccountStore.shared.remove(account: account)
-
-                            // Show login sheet (state persists even after account is deleted)
-                            showReconfigureSheet = true
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.clockwise")
-                                Text("Reconfigurar")
-                            }
-                            .font(.caption2).bold()
-                            .foregroundStyle(.blue)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 2)
-                    }
+                    Text(err).font(.caption).foregroundStyle(.orange).lineLimit(2)
                     Spacer()
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
@@ -149,15 +123,6 @@ struct AccountCard: View {
         .onTapGesture(count: 2) { showDetails = true }
         .sheet(isPresented: $showDetails) {
             AccountDetailsSheet(account: account, isPresented: $showDetails)
-        }
-        .sheet(isPresented: $showReconfigureSheet) {
-            if let provider = reconfigureProvider, let remoteName = reconfigureRemoteName {
-                ReconfigureAccountSheet(
-                    provider: provider,
-                    remoteName: remoteName,
-                    isPresented: $showReconfigureSheet
-                )
-            }
         }
     }
 
