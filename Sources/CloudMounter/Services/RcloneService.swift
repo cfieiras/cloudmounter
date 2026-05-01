@@ -615,14 +615,18 @@ end tell
     /// Open Terminal and run rclone config reconnect for a remote
     nonisolated func openReconnectInTerminal(remoteName: String) {
         guard let rp = rclonePath() else { return }
+        let command = "\(rp) config reconnect '\(remoteName):'"
         let script = """
 tell application "Terminal"
     activate
-    do script "\(rp) config reconnect \"\(remoteName):\" && echo '✅ Autenticación completada' && sleep 2"
+    do script "\(command)"
 end tell
 """
         var error: NSDictionary?
-        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if error != nil {
+            NSLog("❌ AppleScript error: %@", error?.description ?? "unknown")
+        }
     }
 
     // MARK: - Notifications (nonisolated)
