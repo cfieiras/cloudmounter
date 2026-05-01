@@ -7,6 +7,8 @@ struct AccountCard: View {
     @State private var isHovered = false
     @State private var showDetails = false
     @State private var showReconfigureSheet = false
+    @State private var reconfigureProvider: CloudProvider? = nil
+    @State private var reconfigureRemoteName: String? = nil
     @EnvironmentObject var store: AccountStore
 
     var body: some View {
@@ -112,17 +114,15 @@ struct AccountCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(err).font(.caption).foregroundStyle(.orange)
                         Button(action: {
-                            // Save provider info before deleting
-                            let provider = account.provider
-                            let remoteName = account.remoteName
+                            // Save provider info to state BEFORE deleting
+                            reconfigureProvider = account.provider
+                            reconfigureRemoteName = account.remoteName
 
                             // Delete broken account
                             AccountStore.shared.remove(account: account)
 
-                            // Show login sheet with provider preselected
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                showReconfigureSheet = true
-                            }
+                            // Show login sheet (state persists even after account is deleted)
+                            showReconfigureSheet = true
                         }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.clockwise")
@@ -151,11 +151,13 @@ struct AccountCard: View {
             AccountDetailsSheet(account: account, isPresented: $showDetails)
         }
         .sheet(isPresented: $showReconfigureSheet) {
-            ReconfigureAccountSheet(
-                provider: account.provider,
-                remoteName: account.remoteName,
-                isPresented: $showReconfigureSheet
-            )
+            if let provider = reconfigureProvider, let remoteName = reconfigureRemoteName {
+                ReconfigureAccountSheet(
+                    provider: provider,
+                    remoteName: remoteName,
+                    isPresented: $showReconfigureSheet
+                )
+            }
         }
     }
 
