@@ -7,6 +7,7 @@ struct AccountCard: View {
     @State private var isHovered = false
     @State private var showDetails = false
     @State private var showReconfigureSheet = false
+    @EnvironmentObject var store: AccountStore
 
     var body: some View {
         VStack(spacing: 0) {
@@ -111,8 +112,14 @@ struct AccountCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(err).font(.caption).foregroundStyle(.orange)
                         Button(action: {
-                            // Eliminate account and show re-add sheet
+                            // Save provider info before deleting
+                            let provider = account.provider
+                            let remoteName = account.remoteName
+
+                            // Delete broken account
                             AccountStore.shared.remove(account: account)
+
+                            // Show login sheet with provider preselected
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                 showReconfigureSheet = true
                             }
@@ -144,7 +151,11 @@ struct AccountCard: View {
             AccountDetailsSheet(account: account, isPresented: $showDetails)
         }
         .sheet(isPresented: $showReconfigureSheet) {
-            AddAccountSheet(isPresented: $showReconfigureSheet)
+            ReconfigureAccountSheet(
+                provider: account.provider,
+                remoteName: account.remoteName,
+                isPresented: $showReconfigureSheet
+            )
         }
     }
 
@@ -1622,6 +1633,159 @@ struct SettingsRow<Control: View>: View {
             }
             Spacer()
             control
+        }
+    }
+}
+
+// MARK: - ReconfigureAccountSheet
+/// Quick re-auth sheet: jumps straight to login for a specific provider
+struct ReconfigureAccountSheet: View {
+    let provider: CloudProvider
+    let remoteName: String
+    @Binding var isPresented: Bool
+    @EnvironmentObject var store: AccountStore
+
+    @State private var label = ""
+    @State private var notes = ""
+    @State private var mountPath = ""
+    @State private var autoMount = false
+    @State private var useCustomPath = false
+    @State private var connectError = ""
+    @State private var isConnecting = false
+
+    let oauthProviders: [CloudProvider] = [.onedrive, .googledrive, .dropbox, .box]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "arrow.clockwise").font(.title3).foregroundStyle(.blue)
+                Text("Reconfigurar \(provider.displayName)").font(.title2.bold())
+                Spacer()
+                Button { isPresented = false } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).font(.title3)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 24).padding(.vertical, 20)
+            Divider()
+
+            if isConnecting {
+                VStack(spacing: 24) {
+                    Spacer()
+                    VStack(spacing: 16) {
+                        ProgressView().scaleEffect(1.5)
+                        Text("Autenticando...").font(.headline)
+                        Text("Se abrió el navegador. Completá la autorización y volvé a la app.")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 300)
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity).padding(32)
+            } else if !connectError.isEmpty {
+                VStack(spacing: 16) {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 40)).foregroundStyle(.red)
+                    Text("Error al conectar").font(.headline)
+                    Text(connectError).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 340)
+                    Button("Reintentar") {
+                        connectError = ""
+                        isConnecting = true
+                        Task { await performOAuth() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Cancelar") { isPresented = false }.buttonStyle(.bordered)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity).padding(32)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("Se abrirá el navegador para autorizar \(provider.displayName) nuevamente.").font(.subheadline).foregroundStyle(.secondary)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Nombre visible").font(.caption).foregroundStyle(.secondary)
+                            TextField("ej: Trabajo, Personal...", text: $label).textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Nota (opcional)").font(.caption).foregroundStyle(.secondary)
+                            TextField("Descripción, ubicación, etc...", text: $notes).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .padding(24)
+                }
+
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Cancelar") { isPresented = false }.buttonStyle(.bordered)
+                    Button("Conectar con navegador") {
+                        connectError = ""
+                        isConnecting = true
+                        Task { await performOAuth() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(16)
+            }
+        }
+        .frame(width: 500, height: 480)
+    }
+
+    func performOAuth() async {
+        let type = rcloneType(for: provider)
+
+        let createResult = await RcloneService.shared.createRemote(name: remoteName, type: type)
+        if !createResult.ok {
+            await MainActor.run {
+                connectError = "Error creando remote: \(createResult.error)"
+                isConnecting = false
+            }
+            return
+        }
+
+        var authOk = true
+        var authError = ""
+
+        if provider != .onedrive {
+            let authResult = await RcloneService.shared.reconnectRemote(name: remoteName)
+            authOk = authResult.ok
+            authError = authResult.error
+            if !authOk {
+                await RcloneService.shared.deleteRemote(name: remoteName)
+            }
+        }
+
+        await MainActor.run {
+            isConnecting = false
+            if authOk {
+                // Create the account
+                let account = Account(
+                    remoteName: remoteName,
+                    label: label.isEmpty ? remoteName : label,
+                    provider: provider,
+                    autoMount: autoMount,
+                    mountPath: useCustomPath ? mountPath : "",
+                    notes: notes
+                )
+                store.add(account: account)
+                if autoMount {
+                    Task { await RcloneService.shared.updateLaunchAgent(accounts: store.accounts) }
+                }
+                isPresented = false
+            } else {
+                connectError = authError.isEmpty ? "Error de autenticación" : authError
+            }
+        }
+    }
+
+    func rcloneType(for provider: CloudProvider) -> String {
+        switch provider {
+        case .onedrive:    return "onedrive"
+        case .googledrive: return "drive"
+        case .dropbox:     return "dropbox"
+        case .box:         return "box"
+        default:           return provider.rawValue
         }
     }
 }
